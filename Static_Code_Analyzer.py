@@ -1,43 +1,49 @@
 import ast
+import os
 import sys
-from typing import List, Dict
+from collections import defaultdict
 
 class SyncIssueDetector(ast.NodeVisitor):
-    def __init__(self):
-        self.issues: List[str] = []
-        self.locked_vars: Dict[str, bool] = {}
-        
-    def visit_Call(self, node):
-        # Detect lock/unlock operations
-        if isinstance(node.func, ast.Attribute):
-            if node.func.attr == 'acquire':
-                var = node.func.value.id
-                self.locked_vars[var] = True
-            elif node.func.attr == 'release':
-                var = node.func.value.id
-                self.locked_vars[var] = False
-        self.generic_visit(node)
+    def _init_(self):
+        self.shared_resources = defaultdict(list)  # {variable_name: [access_locations]}
+        self.locks = set()
+        self.lock_acquires = defaultdict(list)  # {lock_name: [locations]}
+        self.lock_releases = defaultdict(list)  # {lock_name: [locations]}
+        self.deadlock_pairs = set()
+        self.locked_vars = set()
+        self.current_locks = set()
     
     def visit_Assign(self, node):
-        # Check for unprotected variable access
-        for target in node.targets:
-            if isinstance(target, ast.Name) and target.id in self.locked_vars:
-                if not self.locked_vars[target.id]:
-                    self.issues.append(
-                        f"Line {node.lineno}: Unprotected write to '{target.id}'"
-                    )
+        if isinstance(node.targets[0], ast.Name):
+            var_name = node.targets[0].id
+            if not self.current_locks:  # If no lock is held
+                self.shared_resources[var_name].append((node.lineno, node.col_offset))
+        self.generic_visit(node)
 
-def analyze_file(filename: str) -> List[str]:
-    with open(filename) as f:
-        tree = ast.parse(f.read())
+    def visit_Call(self, node):
+        if isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name):
+            func_name = node.func.attr
+            obj_name = node.func.value.id
+            
+            if func_name == 'acquire':
+                self.locks.add(obj_name)
+                self.lock_acquires[obj_name].append((node.lineno, node.col_offset))
+                self.current_locks.add(obj_name)
+                self.detect_deadlock(obj_name)
+            elif func_name == 'release':
+                self.lock_releases[obj_name].append((node.lineno, node.col_offset))
+                self.current_locks.discard(obj_name)
+        self.generic_visit(node)
+    
+
+def analyze_code(file_path):
+    with open(file_path, "r") as source_file:
+        tree = ast.parse(source_file.read())
     detector = SyncIssueDetector()
     detector.visit(tree)
-    return detector.issues
 
-if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage: python analyzer.py <file_to_analyze>")
+if __name__ == "_main_":
+    if len(sys.argv) != 2:
+        print("Usage: python static_code_analyzer.py <source_code.py>")
         sys.exit(1)
-    
-    results = analyze_file(sys.argv[1])
-    print("\n".join(results) or "✅ No synchronization issues found")
+    analyze_code(sys.argv[1])
